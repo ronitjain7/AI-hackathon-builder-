@@ -416,7 +416,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback } = React;
-    const { parseLogs, validateRcaData, escapeHtml, normalizeMockCauses } = window.IncidentIQUtils;
+    const { parseLogs, validateRcaData, escapeHtml, normalizeMockCauses, generateTimelineFromLogs } = window.IncidentIQUtils;
 
     const SYSTEM_PROMPT = `You are an expert SRE AI. Analyze the provided logs and incident metadata to identify the root cause and recommend fixes.
 Output MUST be valid JSON matching this exact schema:
@@ -2118,36 +2118,40 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                       <span className="badge badge-blue">LAST 15 MIN</span>
                     </div>
                     <div className="tl-body">
-                      {inc?.tl?.lanes?.length ? (
-                        <>
-                          <div className="swimlanes">
-                            {inc.tl.lanes.map((l, i) => (
-                              <div key={i} className="swimlane">
-                                <div className="sl-label" title={l.name}>{l.name}</div>
-                                <div className="sl-track">
-                                  <div className="sl-baseline"></div>
-                                  <div className="detect-line"></div>
-                                  <div className="detect-lbl">DETECTED</div>
-                                  {l.ticks.map((t, j) => (
-                                    <div key={j} className={`tick ${t.type}`} style={{left:`${t.pct}%`}}>
-                                      <div className="tick-tip"><span className="tip-time">{t.t}</span>{t.msg}</div>
+                      {(() => {
+                        const timeline = inc?.tl?.lanes?.length > 0 ? inc.tl : (inc?.logs?.length > 0 ? generateTimelineFromLogs(inc.logs) : null);
+                        if (timeline && timeline.lanes && timeline.lanes.length > 0) {
+                          return (
+                            <>
+                              <div className="swimlanes">
+                                {timeline.lanes.map((l, i) => (
+                                  <div key={i} className="swimlane">
+                                    <div className="sl-label" title={l.name}>{l.name}</div>
+                                    <div className="sl-track">
+                                      <div className="sl-baseline"></div>
+                                      <div className="detect-line"></div>
+                                      <div className="detect-lbl">DETECTED</div>
+                                      {l.ticks.map((t, j) => (
+                                        <div key={j} className={`tick ${t.type}`} style={{left:`${t.pct}%`}}>
+                                          <div className="tick-tip"><span className="tip-time">{t.t}</span>{t.msg}</div>
+                                        </div>
+                                      ))}
                                     </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="tl-axis">
+                                <div className="tl-axis-inner">
+                                  {timeline.labels.map((lbl, i) => (
+                                    <div key={i} className="tl-lbl" style={{left:`${(i/(timeline.labels.length-1))*100}%`}}>{lbl}</div>
                                   ))}
                                 </div>
                               </div>
-                            ))}
-                          </div>
-                          <div className="tl-axis">
-                            <div className="tl-axis-inner">
-                              {inc.tl.labels.map((lbl, i) => (
-                                <div key={i} className="tl-lbl" style={{left:`${(i/(inc.tl.labels.length-1))*100}%`}}>{lbl}</div>
-                              ))}
-                            </div>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="log-empty">No timeline data available</div>
-                      )}
+                            </>
+                          );
+                        }
+                        return <div className="log-empty">No timeline data available</div>;
+                      })()}
                     </div>
                   </div>
 
