@@ -1399,7 +1399,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
 
     /* ── APP ────────────────────────────────────────────────────────── */
     function App() {
-      const savedKey = localStorage.getItem('incidentiq_gemini_key') || 'AIzaSyAWiw_6Qck4pfXtF0Qn6jwIfkbpmaSgC0g';
+      const savedKey = localStorage.getItem('incidentiq_gemini_key') || '';
       const hasVisitedIngest = localStorage.getItem('incidentiq_ingest_visited') === 'true';
       const savedRb = JSON.parse(localStorage.getItem('incidentiq_runbooks') || 'null') || HARDCODED_RUNBOOKS;
 

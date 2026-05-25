@@ -1,0 +1,12 @@
+# API keys and secrets
+.env
+.env.local
+.env.*
+
+# Dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
