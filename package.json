@@ -1,5 +1,18 @@
 {
-  "dependencies": {
-    "puppeteer": "^25.0.4"
+  "name": "incidentiq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI incident root cause analyzer dashboard",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test",
+    "lint": "node scripts/lint.js",
+    "check-secrets": "node scripts/check-secrets.js",
+    "check": "npm run check-secrets && npm run lint && npm run test",
+    "sync": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/sync.ps1"
   }
 }
