@@ -1,0 +1,7 @@
+2024-01-15T22:00:00.000Z INFO deploy-bot Deployed notification-svc v3.1.0 → production
+2024-01-15T22:00:45.112Z ERROR notification-svc Failed to connect to SMTP: Connection refused (host: smtp.internal)
+2024-01-15T22:01:02.334Z ERROR notification-svc ENV VAR MISSING: SMTP_HOST not set in deployment config
+2024-01-15T22:01:03.001Z WARN rabbitmq-cluster notification-svc consumer offline — queue backlog growing
+2024-01-15T22:05:14.778Z WARN rabbitmq-cluster Queue depth: 4,200 messages (threshold: 1,000)
+2024-01-15T22:09:33.990Z ERROR rabbitmq-cluster Queue depth: 18,500 messages — consumer lag critical
+2024-01-15T22:10:01.445Z ERROR notification-svc OOMKilled — container restart #3
