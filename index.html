@@ -410,11 +410,13 @@
 </head>
 <body>
   <div id="root"></div>
+  <script src="./app-utils.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+    const { useState, useEffect, useRef, useCallback } = React;
+    const { parseLogs, validateRcaData, escapeHtml, normalizeMockCauses } = window.IncidentIQUtils;
 
     const SYSTEM_PROMPT = `You are an expert SRE AI. Analyze the provided logs and incident metadata to identify the root cause and recommend fixes.
 Output MUST be valid JSON matching this exact schema:
@@ -506,67 +508,6 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
     });
 
     /* ── LOG PARSER ─────────────────────────────────────────────────── */
-    function parseLogs(rawText) {
-      const lines = rawText.split('\n');
-      const logs = [];
-      let parseErrors = 0;
-      
-      const isoRegex = /^(\d{4}-\d{2}-\d{2}T[\d:.Z+-]+)\s+(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL)\s+(\S+)\s+(.+)$/i;
-      const shortRegex = /^(\d{2}:\d{2}:\d{2}\.\d+)\s+(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL)\s+(\S+)\s+(.+)$/i;
-      
-      for (let line of lines) {
-        line = line.trim();
-        if (!line) continue;
-        
-        let ts, lvl, svc, msg;
-        
-        if (line.startsWith('{') && line.endsWith('}')) {
-          try {
-            const obj = JSON.parse(line);
-            ts = obj.timestamp || obj.time || obj.ts;
-            lvl = obj.level || obj.lvl || obj.severity;
-            svc = obj.service || obj.svc || obj.source;
-            msg = obj.message || obj.msg || obj.text;
-          } catch(e) {}
-        }
-        
-        if (!ts) {
-          const isoMatch = line.match(isoRegex);
-          if (isoMatch) { ts = isoMatch[1]; lvl = isoMatch[2]; svc = isoMatch[3]; msg = isoMatch[4]; }
-        }
-        
-        if (!ts) {
-          const shortMatch = line.match(shortRegex);
-          if (shortMatch) { ts = shortMatch[1]; lvl = shortMatch[2]; svc = shortMatch[3]; msg = shortMatch[4]; }
-        }
-        
-        if (!ts && line.includes('=')) {
-          const kvMatch = (key) => {
-            const r = new RegExp(`(?:^|\s)${key}=("([^"]+)"|(\S+))`, 'i');
-            const m = line.match(r);
-            return m ? (m[2] || m[3]) : null;
-          };
-          ts = kvMatch('timestamp') || kvMatch('time') || kvMatch('ts');
-          lvl = kvMatch('level') || kvMatch('lvl') || kvMatch('severity');
-          svc = kvMatch('service') || kvMatch('svc') || kvMatch('source');
-          msg = kvMatch('message') || kvMatch('msg') || kvMatch('text');
-        }
-        
-        if (ts && lvl && svc && msg) {
-          let nLvl = String(lvl).toUpperCase();
-          if (nLvl === 'WARNING') nLvl = 'WARN';
-          logs.push({ ts: String(ts), lvl: nLvl, svc: String(svc), msg: String(msg) });
-        } else {
-          parseErrors++;
-        }
-      }
-      
-      logs.sort((a,b) => a.ts.localeCompare(b.ts));
-      const services = [...new Set(logs.map(l => l.svc))];
-      
-      return { logs, services, parseErrors };
-    }
-
     function buildUserMessage(incident) {
       const services = [...new Set(incident.logs.map(l => l.svc))];
       return JSON.stringify({
@@ -576,68 +517,71 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
       }, null, 2);
     }
 
-    function buildSlackPayload(incident, rcaData) {
-      // Fallback to mock data if it's a hardcoded demo incident
-      const data = rcaData || (incident.mockCauses ? {
-        causes: incident.mockCauses,
-        fixes: incident.mockFixes,
+        function buildSlackPayload(incident, rcaData) {
+      const mockCauses = normalizeMockCauses(incident.mockCauses || []);
+      const hasMockRca = mockCauses.length > 0;
+      const data = rcaData || (hasMockRca ? {
+        causes: mockCauses,
+        fixes: incident.mockFixes || [],
         impact: {
           estimated_mttr_reduction: incident.metrics[0]?.val,
           affected_services: incident.metrics[1]?.val,
           error_rate_peak: incident.metrics[2]?.val,
           time_to_detect: incident.metrics[3]?.val
         },
-        summary: incident.mockSummary,
+        summary: incident.mockSummary || "Historical incident summary.",
         confidence: incident.confidence || incident.mockConf || 0
       } : null);
-
       if (!data) {
         return {
-          "text": "🚨 INCIDENTIQ RCA Report — " + incident.title,
-          "blocks": [
-            { "type": "header", "text": { "type": "plain_text", "text": "🚨 RCA Report: " + incident.title } },
-            { "type": "section", "fields": [
-              { "type": "mrkdwn", "text": "*Severity:*\n" + incident.sev },
-              { "type": "mrkdwn", "text": "*Service:*\n" + incident.svc }
+          text: "INCIDENTIQ RCA Report - " + incident.title,
+          blocks: [
+            { type: "header", text: { type: "plain_text", text: "RCA Report: " + incident.title } },
+            { type: "section", fields: [
+              { type: "mrkdwn", text: "*Severity:*\n" + incident.sev },
+              { type: "mrkdwn", text: "*Service:*\n" + incident.svc }
             ]},
-            { "type": "context", "elements": [ { "type": "mrkdwn", "text": "RCA analysis not yet complete" } ] }
+            { type: "context", elements: [ { type: "mrkdwn", text: "RCA analysis not yet complete" } ] }
           ]
         };
       }
-      var c1 = (data.causes && data.causes[0]) || {};
-      var c2 = (data.causes && data.causes[1]) || {};
-      var c3 = (data.causes && data.causes[2]) || {};
-      var f1 = (data.fixes && data.fixes[0]) || {};
-      var f2 = (data.fixes && data.fixes[1]) || {};
-      var f3 = (data.fixes && data.fixes[2]) || {};
-      var mttr = (data.impact && data.impact.estimated_mttr_reduction) ? data.impact.estimated_mttr_reduction : "N/A";
+      const c1 = (data.causes && data.causes[0]) || {};
+      const c2 = (data.causes && data.causes[1]) || {};
+      const c3 = (data.causes && data.causes[2]) || {};
+      const f1 = (data.fixes && data.fixes[0]) || {};
+      const f2 = (data.fixes && data.fixes[1]) || {};
+      const f3 = (data.fixes && data.fixes[2]) || {};
+      const c1Conf = c1.confidence ?? c1.conf ?? 0;
+      const c2Conf = c2.confidence ?? c2.conf ?? 0;
+      const c3Conf = c3.confidence ?? c3.conf ?? 0;
+      const mttr = data.impact?.estimated_mttr_reduction || "N/A";
       return {
-        "text": "🚨 INCIDENTIQ RCA Report — " + incident.title,
-        "blocks": [
-          { "type": "header", "text": { "type": "plain_text", "text": "🚨 RCA Report: " + incident.title } },
-          { "type": "section", "fields": [
-              { "type": "mrkdwn", "text": "*Severity:*\n" + incident.sev },
-              { "type": "mrkdwn", "text": "*Service:*\n" + incident.svc },
-              { "type": "mrkdwn", "text": "*Detected:*\n" + incident.ts },
-              { "type": "mrkdwn", "text": "*Confidence:*\n" + data.confidence + "%" }
+        text: "INCIDENTIQ RCA Report - " + incident.title,
+        blocks: [
+          { type: "header", text: { type: "plain_text", text: "RCA Report: " + incident.title } },
+          { type: "section", fields: [
+              { type: "mrkdwn", text: "*Severity:*\n" + incident.sev },
+              { type: "mrkdwn", text: "*Service:*\n" + incident.svc },
+              { type: "mrkdwn", text: "*Detected:*\n" + incident.ts },
+              { type: "mrkdwn", text: "*Confidence:*\n" + data.confidence + "%" }
             ]
           },
-          { "type": "divider" },
-          { "type": "section", "text": { "type": "mrkdwn", "text": "*🔍 Root Causes:*\n1. " + (c1.title||"") + " (" + (c1.confidence||"0") + "%)\n2. " + (c2.title||"") + " (" + (c2.confidence||"0") + "%)\n3. " + (c3.title||"") + " (" + (c3.confidence||"0") + "%)" } },
-          { "type": "section", "text": { "type": "mrkdwn", "text": "*🛠 Recommended Fixes:*\n1. " + (f1.action||"") + "\n   '" + (f1.command||"") + "'\n2. " + (f2.action||"") + "\n   '" + (f2.command||"") + "'\n3. " + (f3.action||"") + "\n   '" + (f3.command||"") + "'" } },
-          { "type": "section", "text": { "type": "mrkdwn", "text": "*📋 AI Summary:*\n" + (data.summary||"") } },
-          { "type": "context", "elements": [ { "type": "mrkdwn", "text": "Generated by *INCIDENTIQ* | Model: gemini-3.5-flash | MTTR Reduction: " + mttr } ] }
+          { type: "divider" },
+          { type: "section", text: { type: "mrkdwn", text: "*Root Causes:*\n1. " + (c1.title || "") + " (" + c1Conf + "%)\n2. " + (c2.title || "") + " (" + c2Conf + "%)\n3. " + (c3.title || "") + " (" + c3Conf + "%)" } },
+          { type: "section", text: { type: "mrkdwn", text: "*Recommended Fixes:*\n1. " + (f1.action || "") + "\n   '" + (f1.command || f1.cmd || "") + "'\n2. " + (f2.action || "") + "\n   '" + (f2.command || f2.cmd || "") + "'\n3. " + (f3.action || "") + "\n   '" + (f3.command || f3.cmd || "") + "'" } },
+          { type: "section", text: { type: "mrkdwn", text: "*AI Summary:*\n" + (data.summary || "") } },
+          { type: "context", elements: [ { type: "mrkdwn", text: "Generated by *INCIDENTIQ* | Model: gemini-3.5-flash | MTTR Reduction: " + mttr } ] }
         ]
       };
     }
 
-
-    /* ── GEMINI API STREAMING ──────────────────────────────────────── */
-    async function callGeminiStream({ incident, apiKey, onChunk, onComplete, onError, onTokens }) {
+    /* GEMINI API STREAMING ──────────────────────────────────────── */
+    async function callGeminiStream({ incident, apiKey, signal, onChunk, onComplete, onError, onTokens }) {
       try {
         const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse&key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal,
           body: JSON.stringify({
             system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
             contents: [{ role: 'user', parts: [{ text: buildUserMessage(incident) }] }],
@@ -692,24 +636,35 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
           
           let jsonStr = fullText.slice(firstBrace, lastBrace + 1);
           
-          // Remove trailing commas which frequently break JSON.parse
-          jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
-          
-          rcaData = JSON.parse(jsonStr); 
+          try {
+            rcaData = JSON.parse(jsonStr); 
+          } catch (err1) {
+            try {
+              // Fallback: Remove trailing commas which occasionally break JSON.parse
+              let fixedStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+              rcaData = JSON.parse(fixedStr);
+            } catch (err2) {
+              throw err1; // Throw original error if fallback also fails
+            }
+          }
         } catch (err) {
           console.error('Malformed JSON received from Gemini:', fullText);
           onError('JSON Parsing Error: ' + err.message + '\n\nTry re-analyzing.'); 
           return;
         }
-        
-        if (!rcaData.causes) rcaData.causes = [];
-        if (!rcaData.fixes) rcaData.fixes = [];
-        if (!rcaData.impact) rcaData.impact = { affected_services: '?', error_rate_peak: '?', time_to_detect: '?', estimated_mttr_reduction: '?' };
-        if (!rcaData.confidence) rcaData.confidence = 0;
-        if (!rcaData.summary) rcaData.summary = 'Analysis complete.';
-        onComplete(rcaData);
+
+        const validated = validateRcaData(rcaData);
+        if (!validated.ok) {
+          onError('Model output validation failed: ' + validated.warnings.join(' '));
+          return;
+        }
+        onComplete(validated.data);
 
       } catch (e) {
+        if (e.name === 'AbortError') {
+          onError('Analysis canceled');
+          return;
+        }
         onError(e.message?.includes('fetch') || e.name === 'TypeError'
           ? 'Network error — check connection'
           : (e.message || 'Unknown error occurred'));
@@ -832,9 +787,9 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
           {ts:"14:17:55.002",lvl:"INFO", svc:"deploy-bot",       msg:"Deployed auth-service v2.4.1 → production (canary: 20%)"}
         ],
         mockCauses: [
-          {rank:"#1",conf:98,title:"PostgreSQL Database Connection Pool Exhaustion",desc:"Slow queries on postgres-primary exhausted the connection pool, causing new DB connection requests to be rejected.",evidence:"Max connections reached (100/100) — new connections rejected"},
-          {rank:"#2",conf:90,title:"Regressive Auth Service Canary Deployment",desc:"Deployment of auth-service v2.4.1 triggered immediate latency spikes and subsequent connection leaks to the primary database.",evidence:"Deployed auth-service v2.4.1 → production (canary: 20%)"},
-          {rank:"#3",conf:85,title:"Payment Gateway Thread Pool Saturation",desc:"Blocking downstream calls to failing auth-service saturated payment-gateway threads, resulting in connection refusals.",evidence:"Thread pool utilization at 94% — approaching saturation"}
+          {rank:"#1",conf:98,confidence:98,title:"PostgreSQL Database Connection Pool Exhaustion",desc:"Slow queries on postgres-primary exhausted the connection pool, causing new DB connection requests to be rejected.",evidence:"Max connections reached (100/100) — new connections rejected"},
+          {rank:"#2",conf:90,confidence:90,title:"Regressive Auth Service Canary Deployment",desc:"Deployment of auth-service v2.4.1 triggered immediate latency spikes and subsequent connection leaks to the primary database.",evidence:"Deployed auth-service v2.4.1 → production (canary: 20%)"},
+          {rank:"#3",conf:85,confidence:85,title:"Payment Gateway Thread Pool Saturation",desc:"Blocking downstream calls to failing auth-service saturated payment-gateway threads, resulting in connection refusals.",evidence:"Thread pool utilization at 94% — approaching saturation"}
         ],
         mockFixes: [
           {step:"01",action:"Rollback auth-service deployment to stable",cmd:"kubectl rollout undo deployment/auth-service"},
@@ -865,7 +820,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         }
         setApiKey(k);
         setKeyStatus('connected');
-        localStorage.setItem('incidentiq_gemini_key', k);
+        sessionStorage.setItem('incidentiq_gemini_key', k);
       };
 
       const handleConnectWebhook = () => {
@@ -877,11 +832,11 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         }
         setSlackWebhook(w);
         setWebhookStatus('connected');
-        localStorage.setItem('incidentiq_slack_webhook', w);
+        sessionStorage.setItem('incidentiq_slack_webhook', w);
       };
 
-      const statusLabel = keyStatus === 'connected' ? '✓ CONNECTED' : keyStatus === 'error' ? 'INVALID KEY FORMAT' : 'CONNECT';
-      const webhookLabel = webhookStatus === 'connected' ? '✓ SAVED' : webhookStatus === 'error' ? 'INVALID URL' : 'SAVE';
+      const statusLabel = keyStatus === 'connected' ? ' CONNECTED' : keyStatus === 'error' ? 'INVALID KEY FORMAT' : 'CONNECT';
+      const webhookLabel = webhookStatus === 'connected' ? ' SAVED' : webhookStatus === 'error' ? 'INVALID URL' : 'SAVE';
 
       return (
         <div className="settings-bar" style={{flexDirection: 'column', alignItems: 'flex-start', gap: '8px', height: 'auto', padding: '10px 20px'}}>
@@ -897,7 +852,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
             />
             <button className={`sb-connect ${keyStatus}`} onClick={handleConnect}>{statusLabel}</button>
             {keyStatus === 'connected' && (
-              <span className="sb-status">Key saved to localStorage</span>
+              <span className="sb-status">Key saved for this browser session</span>
             )}
           </div>
           <div style={{display: 'flex', alignItems: 'center', gap: '10px', width: '100%'}}>
@@ -924,15 +879,24 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
 
     /* ── INGEST LOGS PANEL ──────────────────────────────────────────── */
     function LogIngestionPanel({ onAnalyze }) {
+      const MAX_CHARS = 50000;
+      const MAX_FILE_BYTES = 5 * 1024 * 1024;
       const [mode, setMode] = useState('PASTE');
       const [rawLogs, setRawLogs] = useState('');
       const [meta, setMeta] = useState({ name: '', sev: 'HIGH', svc: '' });
       const [parsedData, setParsedData] = useState(null);
       const [isHover, setIsHover] = useState(false);
+      const [inputError, setInputError] = useState('');
 
       const handleParse = (text) => {
         const t = text || rawLogs;
         if (!t.trim()) return;
+        if (t.length > MAX_CHARS) {
+          setInputError(`Input exceeds ${MAX_CHARS.toLocaleString()} characters.`);
+          setParsedData(null);
+          return;
+        }
+        setInputError('');
         const res = parseLogs(t);
         setParsedData(res);
         if (!meta.svc && res.services.length > 0) setMeta(p => ({...p, svc: res.services[0]}));
@@ -941,6 +905,11 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
       const handleFile = (e) => {
         const file = e.target.files?.[0] || e.dataTransfer?.files?.[0];
         if (!file) return;
+        if (file.size > MAX_FILE_BYTES) {
+          setInputError('File exceeds 5MB limit.');
+          return;
+        }
+        setInputError('');
         const reader = new FileReader();
         reader.onload = (ev) => {
           const text = ev.target.result;
@@ -1001,7 +970,8 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                     onChange={e=>setRawLogs(e.target.value)}
                     placeholder={"Paste your raw logs here. Supported formats:\n\n[ISO timestamp] [LEVEL] [service] message\ntimestamp=... level=... service=... msg=...\nJSON log objects: {\"timestamp\":\"...\",\"level\":\"...\",\"service\":\"...\",\"message\":\"...\"}\n\nExample:\n2024-01-15T14:32:07.441Z ERROR auth-service JWT validation timeout after 5000ms\n2024-01-15T14:32:06.998Z ERROR payment-gateway Upstream auth call failed"}
                   />
-                  <div className="char-count">{rawLogs.length} / 50,000 chars</div>
+                  <div className="char-count" style={{color: rawLogs.length > MAX_CHARS ? 'var(--red)' : 'var(--tx-4)'}}>{rawLogs.length.toLocaleString()} / {MAX_CHARS.toLocaleString()} chars</div>
+                  {inputError && <div className="parsed-err">{inputError}</div>}
                   <div className="btn-ingest-action">
                     <button className="btn-cyan" onClick={()=>handleParse()}>PARSE & PREVIEW →</button>
                     <button className="btn-muted" onClick={()=>{setRawLogs(''); setParsedData(null);}}>CLEAR</button>
@@ -1047,7 +1017,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
               {parsedData && (
                 <div>
                   <div className="parsed-summary" style={{color: parsedData.parseErrors > 0 && parsedData.logs.length === 0 ? 'var(--red)' : 'var(--green)'}}>
-                    ✓ {parsedData.logs.length} logs parsed | {parsedData.services.length} services detected: {parsedData.services.join(', ')}
+                     {parsedData.logs.length} logs parsed | {parsedData.services.length} services detected: {parsedData.services.join(', ')}
                   </div>
                   {parsedData.parseErrors > 0 && (
                     <div className="parsed-err">⚠ {parsedData.parseErrors} lines skipped (unrecognized format)</div>
@@ -1097,7 +1067,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         if (!activeRb) return;
         const allCmds = activeRb.steps.map(s => s.cmd).join('\n');
         navigator.clipboard.writeText(allCmds).catch(()=>{});
-        fireToast('✓ All commands copied');
+        fireToast(' All commands copied');
       };
 
       const handleCopySingle = (cmd, id) => {
@@ -1194,7 +1164,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                         <div className="rb-cmd-wrap">
                           <div className="rb-cmd"><span className="rb-cmd-prefix">$</span>{s.cmd}</div>
                           <button className={`rb-cmd-copy ${copiedCmd===i?'done':''}`} onClick={()=>handleCopySingle(s.cmd,i)}>
-                            {copiedCmd===i?'COPIED ✓':'COPY'}
+                            {copiedCmd===i?'COPIED ':'COPY'}
                           </button>
                         </div>
                       </div>
@@ -1214,6 +1184,12 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
     function HistoryPanel({ data, onViewRca }) {
       const [compMode, setCompMode] = useState(false);
       const [selected, setSelected] = useState([]);
+      const totalIncidents = data.length;
+      const mttrValues = data.map(d => Number(d.mttr)).filter(v => Number.isFinite(v) && v > 0);
+      const avgMttr = mttrValues.length ? Math.round(mttrValues.reduce((a,b)=>a+b,0) / mttrValues.length) : 0;
+      const criticalCount = data.filter(d => d.sev === 'CRITICAL').length;
+      const confValues = data.map(d => Number(d.conf)).filter(v => Number.isFinite(v));
+      const avgConfidence = confValues.length ? Math.round(confValues.reduce((a,b)=>a+b,0) / confValues.length) : 0;
 
       const handleCheck = (id) => {
         if (selected.includes(id)) setSelected(selected.filter(x=>x!==id));
@@ -1274,10 +1250,10 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
             <button className="btn-outline" onClick={()=>{setCompMode(!compMode); setSelected([]);}}>{compMode ? 'CANCEL COMPARE' : '[COMPARE MODE]'}</button>
           </div>
           <div className="hist-stats">
-            <div className="metric-tile"><span className="metric-lbl">TOTAL INCIDENTS</span><span className="metric-val mono" style={{color:'var(--tx-1)'}}>7</span></div>
-            <div className="metric-tile"><span className="metric-lbl">AVG MTTR</span><span className="metric-val mono" style={{color:'var(--teal)'}}>23 MIN</span></div>
-            <div className="metric-tile"><span className="metric-lbl">CRITICAL THIS WEEK</span><span className="metric-val mono" style={{color:'var(--red)'}}>2</span></div>
-            <div className="metric-tile"><span className="metric-lbl">RCA ACCURACY</span><span className="metric-val mono" style={{color:'var(--green)'}}>91%</span></div>
+            <div className="metric-tile"><span className="metric-lbl">TOTAL INCIDENTS</span><span className="metric-val mono" style={{color:'var(--tx-1)'}}>{totalIncidents}</span></div>
+            <div className="metric-tile"><span className="metric-lbl">AVG MTTR</span><span className="metric-val mono" style={{color:'var(--teal)'}}>{avgMttr ? `${avgMttr} MIN` : 'N/A'}</span></div>
+            <div className="metric-tile"><span className="metric-lbl">CRITICAL INCIDENTS</span><span className="metric-val mono" style={{color:'var(--red)'}}>{criticalCount}</span></div>
+            <div className="metric-tile"><span className="metric-lbl">AVG RCA CONF</span><span className="metric-val mono" style={{color:'var(--green)'}}>{avgConfidence}%</span></div>
           </div>
           <div className="hist-table-wrap">
             <table className="hist-table">
@@ -1330,7 +1306,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
       const [rpTab, setRpTab] = useState('RCA REPORT');
       useEffect(() => { if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight; }, [streamedText]);
 
-      if (keyStatus !== 'connected' && !rcaData && !isAnalyzing && !errorMessage && !inc.mockCauses) {
+      if (keyStatus !== 'connected' && !rcaData && !isAnalyzing && !errorMessage && !(inc.mockCauses && inc.mockCauses.length)) {
         return (
           <div className="right-panel">
             <div className="rca-idle">
@@ -1346,7 +1322,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         return (
           <div className="right-panel">
             <div className="rca-error">
-              <div className="error-icon">⚠️</div>
+              <div className="error-icon">⚠ï¸</div>
               <div className="error-title">ANALYSIS FAILED</div>
               <div className="error-msg mono">{errorMessage}</div>
               <button className="btn-retry" onClick={onRetry}>RETRY</button>
@@ -1436,7 +1412,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                       <div className="cmd-box">
                         <span className="cmd-text mono" title={f.cmd}>{f.cmd}</span>
                         <button className={`btn-copy ${copied === f.step ? 'done' : 'idle'}`} onClick={() => onCopy(f.cmd, f.step)}>
-                          {copied === f.step ? 'COPIED ✓' : 'COPY'}
+                          {copied === f.step ? 'COPIED ' : 'COPY'}
                         </button>
                       </div>
                       {f.rationale && <div className="fix-rationale">{f.rationale}</div>}
@@ -1505,7 +1481,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
 
     /* ── APP ────────────────────────────────────────────────────────── */
     function App() {
-      const savedKey = localStorage.getItem('incidentiq_gemini_key') || '';
+      const savedKey = sessionStorage.getItem('incidentiq_gemini_key') || '';
       const hasVisitedIngest = localStorage.getItem('incidentiq_ingest_visited') === 'true';
       const savedRb = JSON.parse(localStorage.getItem('incidentiq_runbooks') || 'null') || HARDCODED_RUNBOOKS;
 
@@ -1538,7 +1514,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
       const [activeRbId,  setActiveRbId]  = useState(runbooks[0]?.id);
       const [demoState,   setDemoState]   = useState(false);
       
-      const savedWebhook = localStorage.getItem('incidentiq_slack_webhook') || '';
+      const savedWebhook = sessionStorage.getItem('incidentiq_slack_webhook') || '';
       const [slackWebhook, setSlackWebhook] = useState(savedWebhook);
       const [webhookStatus, setWebhookStatus] = useState(savedWebhook ? 'connected' : 'idle');
       const [slackSending, setSlackSending] = useState(false);
@@ -1554,30 +1530,27 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         const payload = buildSlackPayload(incident, rcaData);
 
         try {
-          const response = await fetch(slackWebhook, {
+          const response = await fetch("/api/slack-relay", {
             method: "POST",
-            mode: "no-cors",
-            // Slack parses the body as JSON even if Content-Type is not application/json
-            body: JSON.stringify(payload)
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ webhookUrl: slackWebhook, payload })
           });
+          const result = await response.json().catch(() => ({}));
 
-          // In no-cors mode, the response is opaque (status is always 0). 
-          // We can't check response.ok, so we just assume success if it didn't throw an exception.
-          fireToast("✓ Report sent to #incidents", "success");
+          if (!response.ok || !result.ok) {
+            throw new Error(result.error || "Slack relay failed.");
+          }
+
+          fireToast(" Report sent to #incidents", "success");
         } catch (err) {
-          // Slack Incoming Webhooks do not send CORS headers.
-          // fetch() from browser will always throw a CORS/network error
-          // even when the message delivers successfully.
-          // We treat any error as probable success for UX purposes.
-          // For production: proxy through a backend or use Slack's 
-          // response_url pattern.
-          fireToast("✓ Report sent to #incidents", "success");
+          fireToast("Slack send failed: " + (err.message || "Unknown error"), "warn");
         } finally {
           setSlackSending(false);
         }
       }
       const timerRef  = useRef(null);
       const cdRef     = useRef(null);
+      const analysisAbortRef = useRef(null);
       const demoTimeoutsRef = useRef([]);
 
       useEffect(() => {
@@ -1656,10 +1629,24 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         demoTimeoutsRef.current = [];
       };
 
+      useEffect(() => {
+        return () => {
+          clearDemoTimeouts();
+          if (analysisAbortRef.current) {
+            analysisAbortRef.current.abort();
+            analysisAbortRef.current = null;
+          }
+        };
+      }, []);
+
       const toggleDemoMode = () => {
         if (demoState) {
           // STOP DEMO
           clearDemoTimeouts();
+          if (analysisAbortRef.current) {
+            analysisAbortRef.current.abort();
+            analysisAbortRef.current = null;
+          }
           setDemoState(false);
           setIsAnalyzing(false);
           setAlerts(3);
@@ -1777,7 +1764,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
             setRcaData(JSON.parse(DEMO_RCA_JSON));
             setProgresses(p => ({...p, 1:100}));
             setAlerts(3);
-            fireToast('✓ RCA complete — 94% confidence in 20.3s');
+            fireToast(' RCA complete — 94% confidence in 20.3s');
           }, 38300));
           
           // T=43s: DEMO ENDS
@@ -1802,7 +1789,15 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         if (!apiKey || keyStatus !== 'connected') {
           fireToast('Connect your API key first', 'warn'); return;
         }
-        if (isAnalyzing || cooldown > 0 || demoState) return;
+        if (demoState) return;
+        if (analysisAbortRef.current) {
+          analysisAbortRef.current.abort();
+          analysisAbortRef.current = null;
+        }
+
+        const controller = new AbortController();
+        analysisAbortRef.current = controller;
+
         setIsAnalyzing(true);
         setRcaData(null);
         setStreamedText('');
@@ -1812,15 +1807,22 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         callGeminiStream({
           incident,
           apiKey,
+          signal: controller.signal,
           onChunk: (full) => setStreamedText(full),
           onComplete: (data) => {
+            analysisAbortRef.current = null;
             setRcaData(data);
             setIsAnalyzing(false);
             setProgresses(p => ({...p, [incident.id]: 100}));
             setCooldown(10);
-            fireToast('✓ RCA complete', 'success');
+            fireToast(' RCA complete', 'success');
           },
           onError: (msg) => {
+            analysisAbortRef.current = null;
+            if (msg === 'Analysis canceled') {
+              setIsAnalyzing(false);
+              return;
+            }
             setErrorMessage(msg);
             setIsAnalyzing(false);
           },
@@ -1828,10 +1830,15 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
             setTokenUsage(prev => typeof tokens === 'function' ? tokens(prev) : {...(prev||{}), ...tokens});
           }
         });
-      }, [apiKey, keyStatus, isAnalyzing, cooldown, fireToast, demoState]);
+      }, [apiKey, keyStatus, fireToast, demoState]);
 
       const inc = incidents.find(d => d.id === activeId);
       const liveInc = d => ({...d, prog: progresses[d.id] ?? d.prog});
+      const activeIncidentCount = incidents.filter(d => {
+        const progress = progresses[d.id] ?? d.prog;
+        return d.status !== 'resolved' && progress < 100;
+      }).length;
+      const resolvedIncidentCount = HISTORY_DATA.filter(h => h.status === 'RESOLVED').length;
 
       const handleIncidentClick = (id) => {
         setActiveId(id);
@@ -1847,6 +1854,14 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
       };
 
       const handleReanalyze = () => runAnalysis(inc);
+      const handleCancelAnalysis = () => {
+        if (analysisAbortRef.current) {
+          analysisAbortRef.current.abort();
+          analysisAbortRef.current = null;
+          setIsAnalyzing(false);
+          fireToast('Analysis canceled', 'warn');
+        }
+      };
 
       const handleIngestAnalyze = (newInc) => {
         setIncidents(prev => [newInc, ...prev]);
@@ -1875,13 +1890,13 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
 
       const doExportJSON = () => {
         setExportMenu(false);
-        if (!rcaData && !demoState && !inc.mockCauses) {
+        if (!rcaData && !demoState && !(inc.mockCauses && inc.mockCauses.length)) {
           fireToast('Run analysis first before exporting', 'warn'); return;
         }
         const obj = {
           exported_at: new Date().toISOString(),
           incident: { name: inc.title, severity: inc.sev, service: inc.svc, timestamp: inc.ts },
-          rca: rcaData || { causes: inc.mockCauses, fixes: inc.mockFixes, impact: inc.metrics },
+          rca: rcaData || { causes: normalizeMockCauses(inc.mockCauses || []), fixes: inc.mockFixes, impact: inc.metrics },
           logs: inc.logs,
           model: "gemini-3.5-flash"
         };
@@ -1892,17 +1907,37 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
         a.download = `${inc.title.replace(/\s+/g, '-').toLowerCase()}-rca.json`;
         a.click();
         URL.revokeObjectURL(url);
-        fireToast('✓ JSON exported');
+        fireToast(' JSON exported');
       };
 
       const doExportPDF = () => {
         setExportMenu(false);
-        if (!rcaData && !demoState && !inc.mockCauses) {
+        if (!rcaData && !demoState && !(inc.mockCauses && inc.mockCauses.length)) {
           fireToast('Run analysis first before exporting', 'warn'); return;
         }
         const causes = rcaData ? rcaData.causes : inc.mockCauses;
         const fixes = rcaData ? rcaData.fixes : inc.mockFixes;
         const sum = rcaData ? rcaData.summary : "Analysis summary exported.";
+
+        const safeTitle = escapeHtml(inc.title);
+        const safeSev = escapeHtml(inc.sev);
+        const safeSvc = escapeHtml(inc.svc);
+        const safeTs = escapeHtml(inc.ts);
+        const safeSummary = escapeHtml(sum);
+        const safeCauseCards = causes.map(c => {
+          const conf = escapeHtml(String(c.conf ?? c.confidence ?? '0'));
+          const title = escapeHtml(c.title || 'N/A');
+          const desc = escapeHtml(c.desc || c.description || 'N/A');
+          const evidence = escapeHtml(c.evidence || 'N/A');
+          return `<div class="pt-card"><strong>${title} (Conf: ${conf}%)</strong><br/>${desc}<br/><em>Evidence: ${evidence}</em></div>`;
+        }).join('');
+        const safeFixCards = fixes.map(f => {
+          const step = escapeHtml(String(f.step || 'N/A'));
+          const action = escapeHtml(f.action || 'N/A');
+          const cmd = escapeHtml(f.cmd || f.command || 'N/A');
+          const rationale = f.rationale ? `<br/>Rationale: ${escapeHtml(f.rationale)}` : '';
+          return `<div class="pt-card"><strong>Step ${step}: ${action}</strong><code class="pt-code">${cmd}</code>${rationale}</div>`;
+        }).join('');
 
         const printDiv = document.createElement('div');
         printDiv.id = 'print-target';
@@ -1922,22 +1957,23 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
           </style>
           <div class="pt-hdr">INCIDENTIQ — Root Cause Analysis Report</div>
           <div class="pt-meta">
-            <strong>Incident:</strong> ${inc.title}<br/>
-            <strong>Severity:</strong> ${inc.sev}<br/>
-            <strong>Service:</strong> ${inc.svc}<br/>
-            <strong>Time:</strong> ${inc.ts}
+            <strong>Incident:</strong> ${safeTitle}<br/>
+            <strong>Severity:</strong> ${safeSev}<br/>
+            <strong>Service:</strong> ${safeSvc}<br/>
+            <strong>Time:</strong> ${safeTs}
           </div>
           <div class="pt-sec">Summary</div>
-          <p>${sum}</p>
+          <p>${safeSummary}</p>
           <div class="pt-sec">Root Causes</div>
-          ${causes.map(c => `<div class="pt-card"><strong>${c.title} (Conf: ${c.conf||c.confidence}%)</strong><br/>${c.desc||c.description}<br/><em>Evidence: ${c.evidence}</em></div>`).join('')}
+          ${safeCauseCards}
           <div class="pt-sec">Recommended Fixes</div>
-          ${fixes.map(f => `<div class="pt-card"><strong>Step ${f.step}: ${f.action}</strong><code class="pt-code">${f.cmd||f.command}</code>${f.rationale ? `<br/>Rationale: ${f.rationale}` : ''}</div>`).join('')}
+          ${safeFixCards}
           <div class="pt-footer">Generated by INCIDENTIQ | ${new Date().toLocaleString()} | Model: gemini-3.5-flash</div>
         `;
         document.body.appendChild(printDiv);
+        const cleanupPrintDiv = () => printDiv.remove();
+        window.addEventListener('afterprint', cleanupPrintDiv, { once: true });
         window.print();
-        window.onafterprint = () => { printDiv.remove(); window.onafterprint = null; };
       };
 
       const handleViewRca = (id) => {
@@ -1948,7 +1984,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
             id: histInc.id, sev: histInc.sev, ts: histInc.detected, title: histInc.title,
             svc: histInc.svc, status: "resolved", prog: 100, confidence: histInc.conf,
             tl: { labels:[], lanes:[] }, logs: [],
-            mockCauses: [{rank:1, conf:histInc.conf, title:histInc.topCause, desc:"Resolved historical incident", evidence:"Historical data"}],
+            mockCauses: [{rank:1, conf:histInc.conf, confidence:histInc.conf, title:histInc.topCause, desc:"Resolved historical incident", evidence:"Historical data"}],
             mockFixes: [{step:1, action:histInc.topFix, cmd:"# Historical command"}],
             metrics: [
               {label:"MTTR", val:histInc.mttr+"m", clr:"green"}, {label:"ERROR PEAK", val:histInc.errPeak, clr:"amber"}
@@ -2047,7 +2083,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                   <button className="btn-outline" onClick={()=>switchTab('HISTORY')}>→ VIEW IN HISTORY</button>
                 </div>
                 <div style={{padding:'20px 24px', fontFamily:'var(--f-mono)', fontSize:'11px', color:'var(--tx-3)'}}>
-                  1 active incident | 6 resolved in last 7 days
+                  {activeIncidentCount} active incident{activeIncidentCount === 1 ? '' : 's'} | {resolvedIncidentCount} resolved in history
                 </div>
                 <HistoryPanel data={HISTORY_DATA.filter(h => h.status === 'OPEN')} onViewRca={handleViewRca} />
               </div>
@@ -2058,6 +2094,9 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
                   <div className="btn-row">
                     <button className={`btn-outline ${cooldown>0?'cooldown':''}`} onClick={handleReanalyze} disabled={isAnalyzing || cooldown>0 || demoState}>
                       {cooldown>0 ? `COOLDOWN (${cooldown}s)` : 'RE-ANALYZE ↺'}
+                    </button>
+                    <button className="btn-outline" onClick={handleCancelAnalysis} disabled={!isAnalyzing}>
+                      CANCEL ANALYSIS
                     </button>
                     <div style={{position:'relative'}}>
                       <button className="btn-outline" onClick={()=>setExportMenu(!exportMenu)}>EXPORT PDF/JSON ↓</button>
@@ -2149,7 +2188,7 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
           <div className="toast-container">
             {toast.show && (
               <div className={`toast t-${toast.type}`}>
-                <div className="toast-icon">{toast.type==='success'?'✓':toast.type==='warn'?'⚠️':'×'}</div>
+                <div className="toast-icon">{toast.type==='success'?'':toast.type==='warn'?'⚠ï¸':'×'}</div>
                 <div className="toast-msg">{toast.msg}</div>
               </div>
             )}
@@ -2165,3 +2204,4 @@ Rules: Respond ONLY with the JSON object. No text before or after. Base analysis
   </script>
 </body>
 </html>
+
