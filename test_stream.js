@@ -1,7 +1,10 @@
-const apiKey = 'AIzaSyAWiw_6Qck4pfXtF0Qn6jwIfkbpmaSgC0g';
+const apiKey = process.env.GEMINI_API_KEY || "";
 const fs = require('fs');
 
 async function test() {
+  if (!apiKey) {
+    throw new Error("Set GEMINI_API_KEY in your environment before running test_stream.js");
+  }
   const payload = JSON.parse(fs.readFileSync('payload.json', 'utf8'));
   
   // Add system instruction matching what index.html does
