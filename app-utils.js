@@ -238,10 +238,85 @@
     });
   }
 
+  function generateTimelineFromLogs(logs) {
+    if (!logs || logs.length === 0) return { labels: [], lanes: [] };
+    
+    var timestamps = logs.map(function(l) { 
+      var d = Date.parse(l.ts);
+      if (!Number.isNaN(d)) return d;
+      
+      var now = new Date();
+      var parts = String(l.ts).split(/[:.]/);
+      if (parts.length >= 3) {
+        now.setHours(parseInt(parts[0], 10) || 0);
+        now.setMinutes(parseInt(parts[1], 10) || 0);
+        now.setSeconds(parseInt(parts[2], 10) || 0);
+        return now.getTime();
+      }
+      return 0;
+    }).filter(function(t) { return t > 0; });
+
+    if (timestamps.length === 0) return { labels: [], lanes: [] };
+    
+    var minT = Math.min.apply(null, timestamps);
+    var maxT = Math.max.apply(null, timestamps);
+    
+    if (minT === maxT) {
+      maxT = minT + 60000; 
+    }
+    
+    var labels = [];
+    var duration = maxT - minT;
+    for (var i = 0; i <= 5; i++) {
+      var d = new Date(minT + (duration * i) / 5);
+      labels.push(d.toTimeString().substring(0, 5));
+    }
+    
+    var svcMap = {};
+    logs.forEach(function(l) {
+      if (!svcMap[l.svc]) svcMap[l.svc] = [];
+      
+      var t = Date.parse(l.ts);
+      if (Number.isNaN(t)) {
+        var now = new Date();
+        var parts = String(l.ts).split(/[:.]/);
+        if (parts.length >= 3) {
+          now.setHours(parseInt(parts[0], 10) || 0);
+          now.setMinutes(parseInt(parts[1], 10) || 0);
+          now.setSeconds(parseInt(parts[2], 10) || 0);
+          t = now.getTime();
+        } else {
+          t = 0;
+        }
+      }
+      if (!t) return;
+      
+      var pct = ((t - minT) / duration) * 100;
+      var type = 'info';
+      var upper = String(l.lvl).toUpperCase();
+      if (upper === 'WARN' || upper === 'WARNING') type = 'high';
+      else if (upper === 'ERROR' || upper === 'CRITICAL' || upper === 'FATAL') type = 'crit';
+      
+      svcMap[l.svc].push({
+        pct: pct,
+        type: type,
+        t: new Date(t).toTimeString().substring(0, 8),
+        msg: l.msg
+      });
+    });
+    
+    var lanes = Object.keys(svcMap).map(function(svc) {
+      return { name: svc, ticks: svcMap[svc] };
+    });
+    
+    return { labels: labels, lanes: lanes };
+  }
+
   globalObj.IncidentIQUtils = {
     parseLogs: parseLogs,
     validateRcaData: validateRcaData,
     escapeHtml: escapeHtml,
     normalizeMockCauses: normalizeMockCauses,
+    generateTimelineFromLogs: generateTimelineFromLogs,
   };
 })(typeof window !== "undefined" ? window : globalThis);
